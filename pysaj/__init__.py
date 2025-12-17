@@ -245,9 +245,11 @@ class SAJ(object):
                                                 # fallback: attempt arithmetic expression
                                                 num = eval(f"{num}{sen.factor}")
                                         sen.value = num
+                                        if sen.name != "temp" and num < 0:
+                                            sen.value = None
                                     except Exception:
-                                        # keep raw string if conversion fails
-                                        sen.value = v
+                                        # set to None for invalid values to prevent HA issues
+                                        sen.value = None
 
                                 _LOGGER.debug(
                                     f"{datetime.now().isoformat()}: Sensor value after processing: {sen.value}"
@@ -287,8 +289,11 @@ class SAJ(object):
                                                 else:
                                                     num = eval(f"{num}{sen.factor}")
                                             sen.value = num
+                                            if sen.name != "temp" and num < 0:
+                                                sen.value = None
                                         except Exception:
-                                            sen.value = text
+                                            # set to None for invalid values to prevent HA issues
+                                            sen.value = None
                                     sen.date = date.today()
                                     sen.enabled = True
                                     at_least_one_enabled = True
