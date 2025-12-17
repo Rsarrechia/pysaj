@@ -5,3 +5,5 @@ dist
 test.py
 pysaj/__pycache__
 pysaj/.vscode
+/examples
+/tests/__pycache__
