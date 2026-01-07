@@ -1,10 +1,12 @@
 """PySAJ interacts as a library to communicate with SAJ inverters"""
+
+import json
 import aiohttp
 import asyncio
 import concurrent
 import csv
 from io import StringIO
-from datetime import date
+from datetime import date, datetime
 import logging
 import xml.etree.ElementTree as ET
 
@@ -27,8 +29,17 @@ URL_PATH_WIFI_INFO = "info.php"
 class Sensor(object):
     """Sensor definition"""
 
-    def __init__(self, key, csv_1_key, csv_2_key, factor, name, unit='',
-                 per_day_basis=False, per_total_basis=False):
+    def __init__(
+        self,
+        key,
+        csv_1_key,
+        csv_2_key,
+        factor,
+        name,
+        unit="",
+        per_day_basis=False,
+        per_total_basis=False,
+    ):
         self.key = key
         self.csv_1_key = csv_1_key
         self.csv_2_key = csv_2_key
@@ -51,15 +62,13 @@ class Sensors(object):
             (
                 Sensor("p-ac", 11, 23, "", "current_power", "W"),
                 Sensor("e-today", 3, 3, "/100", "today_yield", "kWh", True),
-                Sensor("e-total", 1, 1, "/100", "total_yield", "kWh", False,
-                       True),
+                Sensor("e-total", 1, 1, "/100", "total_yield", "kWh", False, True),
                 Sensor("t-today", 4, 4, "/10", "today_time", "h", True),
                 Sensor("t-total", 2, 2, "/10", "total_time", "h", False, True),
-                Sensor("CO2", 21, 33, "/10", "total_co2_reduced", "kg", False,
-                       True),
+                Sensor("CO2", 21, 33, "/10", "total_co2_reduced", "kg", False, True),
                 Sensor("temp", 20, 32, "/10", "temperature", "°C"),
                 Sensor("state", 22, 34, "", "state"),
-                Sensor("maxPower", -1, -1, "", "today_max_current", "W", True)
+                Sensor("maxPower", -1, -1, "", "today_max_current", "W", True),
             )
         )
 
@@ -110,7 +119,7 @@ class Sensors(object):
 class SAJ(object):
     """Provides access to SAJ inverter data"""
 
-    def __init__(self, host, wifi=False, username='admin', password='admin'):
+    def __init__(self, host, wifi=False, username="admin", password="admin"):
         self.host = host
         self.wifi = wifi
         self.username = username
@@ -119,13 +128,12 @@ class SAJ(object):
 
         self.url = "http://{0}/".format(self.host)
         if self.wifi:
-            if (len(self.username) > 0
-               and len(self.password) > 0):
-                self.url = "http://{0}:{1}@{2}/".format(self.username,
-                                                        self.password,
-                                                        self.host)
-                self.url_info = self.url + URL_PATH_WIFI_INFO
-                self.url += URL_PATH_WIFI
+            if len(self.username) > 0 and len(self.password) > 0:
+                self.url = "http://{0}:{1}@{2}/".format(
+                    self.username, self.password, self.host
+                )
+            self.url_info = self.url + URL_PATH_WIFI_INFO
+            self.url += URL_PATH_WIFI
         else:
             self.url_info = self.url + URL_PATH_ETHERNET_INFO
             self.url += URL_PATH_ETHERNET
@@ -135,17 +143,23 @@ class SAJ(object):
 
         try:
             timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(timeout=timeout,
-                                             raise_for_status=True) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout, raise_for_status=True
+            ) as session:
                 current_url = self.url_info
                 async with session.get(current_url) as response:
-                    data = await response.text()
-
+                    data = await response.text(encoding='latin1')
+                    _LOGGER.debug(
+                        f"{datetime.now().isoformat()}: Info data received: {data}"
+                    )
                     if self.wifi:
                         csv_data = StringIO(data)
                         reader = csv.reader(csv_data)
 
                         for row in reader:
+                            _LOGGER.debug(
+                                f"{datetime.now().isoformat()}: Info CSV row:{row}"
+                            )
                             self.serialnumber = row.pop(0)
                     else:
                         xml = ET.fromstring(data)
@@ -154,50 +168,92 @@ class SAJ(object):
                         if find is not None:
                             self.serialnumber = find.text
 
-                    _LOGGER.debug("Inverter SN: %s", self.serialnumber)
+                    _LOGGER.debug(
+                        f"{datetime.now().isoformat()}: Inverter SN: {self.serialnumber}"
+                    )
 
                 current_url = self.url
                 async with session.get(current_url) as response:
-                    data = await response.text()
+                    data = await response.text(encoding='latin1')
                     at_least_one_enabled = False
 
                     if self.wifi:
                         csv_data = StringIO(data)
                         reader = csv.reader(csv_data)
-                        ncol = len(next(reader))
-                        csv_data.seek(0)
+                        _LOGGER.debug(
+                            f"{datetime.now().isoformat()}: Data CSV received"
+                        )
+                        _LOGGER.debug(
+                            f"{datetime.now().isoformat()}: Data CSV content: {data}"
+                        )
 
                         values = []
-
                         for row in reader:
-                            for (i, v) in enumerate(row):
+                            for v in row:
                                 values.append(v)
 
+                        _LOGGER.debug(
+                            f"{datetime.now().isoformat()}: Values Data CSV content: {values}"
+                        )
+
+                        if not values:
+                            raise csv.Error
+
+                        ncol = len(values)
+
                         for sen in sensors:
-                            if ncol < 24:
-                                if sen.csv_1_key != -1:
-                                    try:
-                                        v = values[sen.csv_1_key]
-                                    except IndexError:
-                                        v = None
-                                else:
+                            _LOGGER.debug(
+                                f"{datetime.now().isoformat()}: Sensor: {sen.__dict__}"
+                            )
+                            v = None
+                            if sen.csv_2_key != -1 and sen.csv_2_key < len(values):
+                                v = values[sen.csv_2_key]
+                            elif sen.csv_1_key != -1 and sen.csv_1_key < len(values):
+                                v = values[sen.csv_1_key]
+
+                            # normalize empty strings to None
+                            if v is not None:
+                                v = v.strip()
+                                if v == "":
                                     v = None
-                            else:
-                                if sen.csv_2_key != -1:
-                                    try:
-                                        v = values[sen.csv_2_key]
-                                    except IndexError:
-                                        v = None
-                                else:
-                                    v = None
+                            _LOGGER.debug(
+                                f"{datetime.now().isoformat()}: Sensor value before processing: {v}"
+                            )
 
                             if v is not None:
                                 if sen.name == "state":
-                                    sen.value = MAPPER_STATES[v]
+                                    sen.value = MAPPER_STATES.get(v, f"Unknown({v})")
+                                    if sen.value != "Normal":
+                                        _LOGGER.warning(
+                                            f"{datetime.now().isoformat()}: Inverter state is not normal: {sen.value}. "
+                                            "Sensor values may be erroneous."
+                                        )
                                 else:
-                                    sen.value = eval(
-                                        "{0}{1}".format(v, sen.factor)
-                                    )
+                                    # try to convert to a numeric value and apply factor
+                                    try:
+                                        num = float(v)
+                                        if sen.factor and (
+                                            sen.name == "temp" or num >= 0
+                                        ):
+                                            if sen.factor.startswith("/"):
+                                                denom = float(sen.factor[1:])
+                                                num = num / denom
+                                            elif sen.factor.startswith("*"):
+                                                mul = float(sen.factor[1:])
+                                                num = num * mul
+                                            else:
+                                                # fallback: attempt arithmetic expression
+                                                num = eval(f"{num}{sen.factor}")
+                                        sen.value = num
+                                        if sen.name != "temp" and num < 0:
+                                            sen.value = None
+                                    except Exception:
+                                        # set to None for invalid values to prevent HA issues
+                                        sen.value = None
+
+                                _LOGGER.debug(
+                                    f"{datetime.now().isoformat()}: Sensor value after processing: {sen.value}"
+                                )
                                 sen.date = date.today()
                                 sen.enabled = True
                                 at_least_one_enabled = True
@@ -206,11 +262,41 @@ class SAJ(object):
 
                         for sen in sensors:
                             find = xml.find(sen.key)
-                            if find is not None:
-                                sen.value = find.text
-                                sen.date = date.today()
-                                sen.enabled = True
-                                at_least_one_enabled = True
+                            if find is not None and find.text is not None:
+                                text = find.text.strip()
+                                if text != "":
+                                    if sen.name == "state":
+                                        sen.value = MAPPER_STATES.get(
+                                            text, f"Unknown({text})"
+                                        )
+                                        if sen.value != "Normal":
+                                            _LOGGER.warning(
+                                                f"{datetime.now().isoformat()}: Inverter state is not normal: {sen.value}. "
+                                                "Sensor values may be erroneous."
+                                            )
+                                    else:
+                                        try:
+                                            num = float(text)
+                                            if sen.factor and (
+                                                sen.name == "temp" or num >= 0
+                                            ):
+                                                if sen.factor.startswith("/"):
+                                                    denom = float(sen.factor[1:])
+                                                    num = num / denom
+                                                elif sen.factor.startswith("*"):
+                                                    mul = float(sen.factor[1:])
+                                                    num = num * mul
+                                                else:
+                                                    num = eval(f"{num}{sen.factor}")
+                                            sen.value = num
+                                            if sen.name != "temp" and num < 0:
+                                                sen.value = None
+                                        except Exception:
+                                            # set to None for invalid values to prevent HA issues
+                                            sen.value = None
+                                    sen.date = date.today()
+                                    sen.enabled = True
+                                    at_least_one_enabled = True
 
                     if not at_least_one_enabled:
                         if self.wifi:
@@ -218,20 +304,26 @@ class SAJ(object):
                         else:
                             raise ET.ParseError
 
+                    _LOGGER.debug(
+                        f"{datetime.now().isoformat()}: sensor enabled status: {sen.enabled}"
+                    )
                     if sen.enabled:
-                        _LOGGER.debug("Got new value for sensor %s: %s",
-                                      sen.name, sen.value)
+                        _LOGGER.debug(
+                            f"{datetime.now().isoformat()}: Got new value for sensor {sen.name}: {sen.value}"
+                        )
 
                     return True
-        except (aiohttp.client_exceptions.ClientConnectorError,
-                concurrent.futures._base.TimeoutError):
+        except (
+            aiohttp.client_exceptions.ClientConnectorError,
+            concurrent.futures._base.TimeoutError,
+        ):
             # Connection to inverter not possible.
             # This can be "normal" - so warning instead of error - as SAJ
             # inverters are powered by DC and thus have no power after the sun
             # has set.
-            _LOGGER.warning("Connection to SAJ inverter is not possible. " +
-                            "The inverter may be offline due to darkness. " +
-                            "Otherwise check host/ip address.")
+            _LOGGER.warning(
+                f"{datetime.now().isoformat()} Connection to SAJ inverter is not possible. The inverter may be offline due to darkness. Otherwise check host/ip address."
+            )
             return False
         except aiohttp.client_exceptions.ClientResponseError as err:
             # 401 Unauthorized: wrong username/password
@@ -242,24 +334,28 @@ class SAJ(object):
         except csv.Error:
             # CSV is not valid
             raise UnexpectedResponseException(
-                str.format("No valid CSV received from {0} at {1}", self.host,
-                           current_url)
+                str.format(
+                    "No valid CSV received from {0} at {1}", self.host, current_url
+                )
             )
         except ET.ParseError:
             # XML is not valid or even no XML at all
             raise UnexpectedResponseException(
-                str.format("No valid XML received from {0} at {1}", self.host,
-                           current_url)
+                str.format(
+                    "No valid XML received from {0} at {1}", self.host, current_url
+                )
             )
 
 
 class UnauthorizedException(Exception):
     """Exception for Unauthorized 401 status code"""
+
     def __init__(self, message):
         Exception.__init__(self, message)
 
 
 class UnexpectedResponseException(Exception):
     """Exception for unexpected status code"""
+
     def __init__(self, message):
         Exception.__init__(self, message)
