@@ -52,6 +52,10 @@ CONFIRM_READINGS = 3
 # Slack allowed when checking a daily counter against its lifetime counter.
 CONSISTENCY_TOLERANCE = 1.0
 
+# A rejected counter usually repeats on every poll, so only warn about it
+# occasionally and report how many were suppressed in between.
+WARN_INTERVAL_SECONDS = 300
+
 
 def _apply_factor(num, factor):
     """Scale a raw reading. Only "/N" and "*N" factors are supported."""
@@ -115,6 +119,26 @@ def _coerce(sen, raw):
     return num
 
 
+def _warn_throttled(sen, now, message, *args):
+    """Warn about a repeating rejection without flooding the log.
+
+    The trailing "%s" in `message` receives a note about how many identical
+    rejections were suppressed since the previous warning.
+    """
+    last = sen.last_warning
+    if last is not None and (now - last).total_seconds() < WARN_INTERVAL_SECONDS:
+        sen.suppressed_warnings += 1
+        return
+
+    if sen.suppressed_warnings:
+        note = f" ({sen.suppressed_warnings} identical since the last message)"
+    else:
+        note = ""
+    _LOGGER.warning(message, *args, note)
+    sen.last_warning = now
+    sen.suppressed_warnings = 0
+
+
 def _accept_cumulative(sen, new, now):
     """Decide whether a lifetime counter may move to `new`.
 
@@ -129,9 +153,11 @@ def _accept_cumulative(sen, new, now):
         return True
 
     if new < old:
-        _LOGGER.warning(
+        _warn_throttled(
+            sen,
+            now,
             "Ignoring %s going backwards (%s -> %s%s). Keeping the previous value; "
-            "a decrease would be read as a meter reset",
+            "a decrease would be read as a meter reset%s",
             sen.name,
             old,
             new,
@@ -160,9 +186,11 @@ def _accept_cumulative(sen, new, now):
         sen.pending_count = 1
 
     if sen.pending_count < CONFIRM_READINGS:
-        _LOGGER.warning(
+        _warn_throttled(
+            sen,
+            now,
             "Holding back an implausible jump for %s (%s -> %s%s in %.1f min); "
-            "%s of %s confirmations",
+            "%s of %s confirmations%s",
             sen.name,
             old,
             new,
@@ -247,6 +275,8 @@ class Sensor(object):
         self.last_update = None
         self.pending_value = None
         self.pending_count = 0
+        self.last_warning = None
+        self.suppressed_warnings = 0
 
         # Decimals implied by the factor, for display purposes.
         self.precision = 0
