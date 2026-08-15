@@ -1,10 +1,6 @@
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import date
-import xml.etree.ElementTree as ET
-from io import StringIO
-import csv
+from unittest.mock import MagicMock
+from datetime import date, datetime, timedelta, timezone
 import aiohttp
 
 from pysaj import (
@@ -16,6 +12,24 @@ from pysaj import (
     UnexpectedResponseException,
 )
 from aioresponses import aioresponses
+
+
+# A real 35 field record as returned by status.php on a 3 phase inverter with
+# two PV strings connected (the unconnected channels report 65535).
+WIFI_RECORD = (
+    "3,1758433,121794,1165,82,3099,39,1657,40,"
+    "65535,65535,65535,65535,65535,65535,65535,65535,"
+    "65535,65535,65535,65535,65535,65535,"
+    "185,4998,2290,55,2290,56,2286,56,6205,397,138036,2"
+)
+
+
+def wifi_record(overrides):
+    """Build a 35 field record with individual fields replaced by index."""
+    fields = WIFI_RECORD.split(",")
+    for index, value in overrides.items():
+        fields[index] = str(value)
+    return ",".join(fields)
 
 
 class TestSensor:
@@ -33,6 +47,11 @@ class TestSensor:
         assert s.enabled is False
         assert s.date == date.today()
 
+    def test_precision_from_factor(self):
+        assert Sensor("k", 1, 1, "", "n").precision == 0
+        assert Sensor("k", 1, 1, "/10", "n").precision == 1
+        assert Sensor("k", 1, 1, "/100", "n").precision == 2
+
 
 class TestSensors:
     def test_init_wifi_false(self):
@@ -40,10 +59,24 @@ class TestSensors:
         assert len(sensors) == 9
         assert "current_power" in sensors
         assert sensors["p-ac"].key == "p-ac"
+        # Only reported over the XML interface.
+        assert "today_max_current" in sensors
 
     def test_init_wifi_true(self):
         sensors = Sensors(wifi=True)
-        assert len(sensors) == 9
+        # The eight shared sensors plus the channels only the WiFi module has.
+        assert len(sensors) == 34
+        for name in (
+            "pv1_voltage",
+            "pv2_current",
+            "pv3_string4_current",
+            "grid_frequency",
+            "line3_voltage",
+            "bus_voltage",
+        ):
+            assert name in sensors
+        # Never present in the CSV, so it must not be offered for WiFi.
+        assert "today_max_current" not in sensors
 
     def test_getitem_by_name(self):
         sensors = Sensors()
@@ -85,10 +118,10 @@ class TestSensors:
 
     def test_add_replace(self, caplog):
         sensors = Sensors()
-        original = sensors["current_power"]
-        new_sensor = Sensor("p-ac", 11, 23, "", "current_power", "kW")  # different unit
+        initial_len = len(sensors)
+        new_sensor = Sensor("p-ac", 11, 23, "", "current_power", "kW")
         sensors.add(new_sensor)
-        assert len(sensors) == 9  # same length
+        assert len(sensors) == initial_len
         assert sensors["current_power"].unit == "kW"
         assert "Replacing sensor" in caplog.text
 
@@ -154,21 +187,40 @@ class TestSAJ:
         saj = SAJ("192.168.1.100", wifi=True)
         sensors = Sensors(wifi=True)
 
-        # Mock CSV responses
-        info_csv = "SN123456789\n"
-        data_csv = "1000,0,500,500,60,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,1000\n"
+        info_csv = "SN123456789,x,00,0000,2,7\n"
 
         with aioresponses() as rs:
             rs.get(saj.url_info, body=info_csv)
-            rs.get(saj.url, body=data_csv)
+            rs.get(saj.url, body=WIFI_RECORD + "\n")
 
             result = await saj.read(sensors)
 
             assert result is True
             assert saj.serialnumber == "SN123456789"
-            assert sensors["current_power"].value == 1000.0
-            assert sensors["today_yield"].value == 5.0
+            assert sensors["total_yield"].value == 17584.33
+            assert sensors["today_yield"].value == 11.65
+            assert sensors["current_power"].value == 185.0
+            assert sensors["temperature"].value == 39.7
             assert sensors["state"].value == "Normal"
+
+    @pytest.mark.asyncio
+    async def test_read_wifi_exposes_new_channels(self):
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+
+        with aioresponses() as rs:
+            rs.get(saj.url_info, body="SN1\n")
+            rs.get(saj.url, body=WIFI_RECORD + "\n")
+
+            assert await saj.read(sensors) is True
+
+        assert sensors["pv1_voltage"].value == 309.9
+        assert sensors["pv1_current"].value == 0.39
+        assert sensors["pv2_voltage"].value == 165.7
+        assert sensors["grid_frequency"].value == 49.98
+        assert sensors["line1_voltage"].value == 229.0
+        assert sensors["line3_current"].value == 0.56
+        assert sensors["bus_voltage"].value == 620.5
 
     @pytest.mark.asyncio
     async def test_read_connection_error(self):
@@ -206,12 +258,9 @@ class TestSAJ:
         saj = SAJ("192.168.1.100", wifi=True)
         sensors = Sensors(wifi=True)
 
-        info_csv = "SN123\n"
-        data_csv = ""  # Empty CSV
-
         with aioresponses() as rs:
-            rs.get(saj.url_info, body=info_csv)
-            rs.get(saj.url, body=data_csv)
+            rs.get(saj.url_info, body="SN123\n")
+            rs.get(saj.url, body="")
 
             with pytest.raises(UnexpectedResponseException):
                 await saj.read(sensors)
@@ -221,15 +270,189 @@ class TestSAJ:
         saj = SAJ("192.168.1.100", wifi=False)
         sensors = Sensors()
 
-        info_xml = "<invalid>"
-        data_xml = "<also invalid>"
-
         with aioresponses() as rs:
-            rs.get(saj.url_info, body=info_xml)
-            rs.get(saj.url, body=data_xml)
+            rs.get(saj.url_info, body="<invalid>")
+            rs.get(saj.url, body="<also invalid>")
 
             with pytest.raises(UnexpectedResponseException):
                 await saj.read(sensors)
+
+
+class TestRecordGuards:
+    """The record must be well formed before any field is trusted."""
+
+    def _prime(self):
+        """A sensor set holding one good record."""
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+        assert saj._read_wifi(WIFI_RECORD, sensors) is True
+        return saj, sensors
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "3,17",  # truncated mid number
+            "w",  # the module's wait marker
+            "3,1758433,121794,1165,82",  # partial record
+            WIFI_RECORD + ",99",  # unexpected extra field
+        ],
+    )
+    def test_malformed_record_is_discarded(self, body):
+        saj, sensors = self._prime()
+        before = sensors["total_yield"].value
+
+        assert saj._read_wifi(body, sensors) is False
+        assert sensors["total_yield"].value == before
+
+    def test_multiline_record_is_discarded(self):
+        saj, sensors = self._prime()
+        before = sensors["total_yield"].value
+
+        assert saj._read_wifi("w\n" + WIFI_RECORD, sensors) is False
+        assert sensors["total_yield"].value == before
+
+    def test_old_23_field_layout_still_reads(self):
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+        # Older firmware: current_power at 11, temp at 20, CO2 at 21, state at 22.
+        old = "0,1758433,121794,1165,82,0,0,0,0,0,0,185,0,0,0,0,0,0,0,0,397,138036,2"
+        assert len(old.split(",")) == 23
+
+        assert saj._read_wifi(old, sensors) is True
+        assert sensors["total_yield"].value == 17584.33
+        assert sensors["current_power"].value == 185.0
+        assert sensors["temperature"].value == 39.7
+        assert sensors["state"].value == "Normal"
+        # 35 field only channels must stay absent on the old layout.
+        assert sensors["bus_voltage"].enabled is False
+
+    def test_not_available_sentinel_is_not_a_reading(self):
+        _, sensors = self._prime()
+        # 65535 in the record means the channel does not exist.
+        assert sensors["pv3_voltage"].value is None
+        assert sensors["pv3_voltage"].enabled is False
+        assert sensors["pv1_string1_current"].enabled is False
+
+    def test_daily_above_lifetime_is_discarded(self):
+        saj, sensors = self._prime()
+        before = sensors["today_yield"].value
+
+        # today_yield 200.00 kWh against a lifetime total of 1.00 kWh
+        bad = wifi_record({1: 100, 3: 20000})
+        assert saj._read_wifi(bad, sensors) is False
+        assert sensors["today_yield"].value == before
+
+    def test_out_of_range_field_is_dropped(self):
+        saj, sensors = self._prime()
+        # 300.00 Hz is not a grid frequency.
+        assert saj._read_wifi(wifi_record({24: 30000}), sensors) is True
+        assert sensors["grid_frequency"].value == 49.98
+
+    def test_negative_temperature_is_kept(self):
+        saj, sensors = self._prime()
+        # -3.5 degrees, which the old name/key mix up turned into None.
+        assert saj._read_wifi(wifi_record({32: -35}), sensors) is True
+        assert sensors["temperature"].value == -3.5
+
+
+class TestCumulativeGuards:
+    """Lifetime counters must never regress or jump implausibly."""
+
+    def _prime(self):
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+        assert saj._read_wifi(WIFI_RECORD, sensors) is True
+        return saj, sensors
+
+    def test_backwards_total_is_rejected(self, caplog):
+        saj, sensors = self._prime()
+
+        # The observed failure: the register dips by a few kWh.
+        assert saj._read_wifi(wifi_record({1: 1756793}), sensors) is True
+        assert sensors["total_yield"].value == 17584.33
+        assert "going backwards" in caplog.text
+
+    def test_total_dropping_to_zero_is_rejected(self):
+        saj, sensors = self._prime()
+
+        assert saj._read_wifi(wifi_record({1: 0, 3: 0}), sensors) is True
+        assert sensors["total_yield"].value == 17584.33
+
+    def test_normal_growth_is_accepted(self):
+        saj, sensors = self._prime()
+
+        assert saj._read_wifi(wifi_record({1: 1758440}), sensors) is True
+        assert sensors["total_yield"].value == 17584.40
+
+    def test_implausible_jump_is_held_then_confirmed(self, caplog):
+        saj, sensors = self._prime()
+        spike = wifi_record({1: 9999999})
+
+        # Held back while it looks like a one off.
+        assert saj._read_wifi(spike, sensors) is True
+        assert sensors["total_yield"].value == 17584.33
+        assert saj._read_wifi(spike, sensors) is True
+        assert sensors["total_yield"].value == 17584.33
+        assert "Holding back" in caplog.text
+
+        # Consistently reported, so it is real and must not freeze the counter.
+        assert saj._read_wifi(spike, sensors) is True
+        assert sensors["total_yield"].value == 99999.99
+
+    def test_long_gap_allows_a_large_increase(self):
+        saj, sensors = self._prime()
+        total = sensors["total_yield"]
+        # Home Assistant was down for two days.
+        total.last_update = datetime.now(timezone.utc) - timedelta(days=2)
+
+        assert saj._read_wifi(wifi_record({1: 1763433}), sensors) is True
+        assert sensors["total_yield"].value == 17634.33
+
+
+class TestRunStateGate:
+    """Readings taken while the inverter is not running are not trusted."""
+
+    def _prime(self):
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+        assert saj._read_wifi(WIFI_RECORD, sensors) is True
+        return saj, sensors
+
+    @pytest.mark.parametrize("code", [0, 1, 3, 4])
+    def test_non_normal_state_clears_live_and_keeps_counters(self, code):
+        saj, sensors = self._prime()
+
+        # A zeroed wake up record carrying a non normal run state.
+        waking = wifi_record({1: 0, 3: 0, 23: 0, 34: code})
+        assert saj._read_wifi(waking, sensors) is True
+
+        # Counters survive untouched, so Home Assistant sees no meter reset.
+        assert sensors["total_yield"].value == 17584.33
+        assert sensors["today_yield"].value == 11.65
+        # Live readings are unknown rather than a stale or bogus number.
+        assert sensors["current_power"].value is None
+        assert sensors["grid_frequency"].value is None
+        assert sensors["state"].value == MAPPER_STATES[str(code)]
+
+    def test_channels_stay_enabled_while_not_running(self):
+        """Entities must still be created if setup lands in a bad window."""
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+
+        assert saj._read_wifi(wifi_record({34: 1}), sensors) is True
+        assert sensors["total_yield"].enabled is True
+        assert sensors["bus_voltage"].enabled is True
+        assert sensors["total_yield"].value is None
+
+    def test_recovery_after_waking(self):
+        saj, sensors = self._prime()
+
+        assert saj._read_wifi(wifi_record({34: 1, 23: 0}), sensors) is True
+        assert sensors["current_power"].value is None
+
+        assert saj._read_wifi(WIFI_RECORD, sensors) is True
+        assert sensors["current_power"].value == 185.0
+        assert sensors["total_yield"].value == 17584.33
 
 
 class TestExceptions:
@@ -248,5 +471,4 @@ class TestMapperStates:
         assert MAPPER_STATES["2"] == "Normal"
 
     def test_unknown_state(self):
-        # In code, uses .get(v, f"Unknown({v})")
         assert MAPPER_STATES.get("99", "Unknown(99)") == "Unknown(99)"
