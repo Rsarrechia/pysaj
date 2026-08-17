@@ -7,8 +7,9 @@ It is based on the pysma component written by @kellerza
 
 `Sensors(wifi=True)` reads the WiFi module's `status/status.php`; `Sensors(wifi=False)`
 reads the ethernet interface's `real_time_data.xml`. A sensor is only reported as
-`enabled` once the inverter has actually returned a value for it, so channels the
-hardware does not have (a third PV string, per-string currents) never show up.
+`enabled` once the inverter has actually returned a value for it, so channels a
+particular inverter does not have (a third PV string, unused string currents) never
+show up.
 
 | Sensor | Unit | Interface |
 | --- | --- | --- |
@@ -19,16 +20,24 @@ hardware does not have (a third PV string, per-string currents) never show up.
 | `temperature` | °C | both |
 | `state` | | both |
 | `today_max_current` | W | ethernet |
-| `pv1_voltage` … `pv3_voltage` | V | wifi |
-| `pv1_current` … `pv3_current` | A | wifi |
-| `pv1_string1_current` … `pv3_string4_current` | A | wifi |
-| `grid_frequency` | Hz | wifi |
-| `line1_voltage` … `line3_voltage` | V | wifi |
-| `line1_current` … `line3_current` | A | wifi |
-| `bus_voltage` | V | wifi |
+| `pv1_voltage` … `pv3_voltage` | V | WiFi ✓ · LAN pending¹ |
+| `pv1_current` … `pv3_current` | A | WiFi ✓ · LAN pending¹ |
+| `pv1_string1_current` … `pv3_string4_current` | A | WiFi ✓ · LAN pending¹ |
+| `grid_frequency` | Hz | WiFi ✓ · LAN pending¹ |
+| `line1_voltage` … `line3_voltage` | V | WiFi ✓ · LAN pending¹ |
+| `line1_current` … `line3_current` | A | WiFi ✓ · LAN pending¹ |
+| `bus_voltage` | V | WiFi ✓ · LAN pending¹ |
 
-Field positions, scaling and units for the WiFi channels come from the module's own
-`status.html` (its `cf` array) and `/i18n/en/status.xml` (its `u<N>` entries).
+¹ These values are **not WiFi-exclusive** — the inverter measures them regardless of
+how you connect. They are currently wired up and verified only for the WiFi interface,
+where field positions, scaling and units come from the module's own `status.html`
+(its `cf` array) and `/i18n/en/status.xml` (its `u<N>` entries). The ethernet/LAN
+interface exposes the same values in `real_time_data.xml`, but under different XML tag
+names that have not been confirmed against a device (for example, PV1 appears to be
+`<pv1-v>` / `<pv1-c>`). Adding LAN support is a matter of filling in each sensor's
+`key` with the correct XML tag — contributions from anyone with a LAN-connected SAJ
+inverter are welcome. Until then these sensors simply stay disabled on the LAN
+interface rather than reporting wrong values.
 
 ## Validation
 
