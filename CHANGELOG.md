@@ -3,7 +3,7 @@
 All notable changes to this fork are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.1.1] - unreleased
+## [0.1.1] - 2026-08-17
 
 ### Changed
 - Modern packaging: `pyproject.toml` (PEP 621) replaces `setup.py`; test
