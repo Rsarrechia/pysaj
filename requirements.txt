@@ -1,4 +1,6 @@
+# Runtime dependency. The authoritative dependency list now lives in
+# pyproject.toml; this file is kept for convenience.
+#
+#   Install the library:            pip install .
+#   Install with test extras:       pip install .[test]
 aiohttp>=3.8
-pytest>=7.0
-pytest-asyncio>=0.21
-aioresponses>=0.7

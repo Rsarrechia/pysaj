@@ -9,6 +9,13 @@ import xml.etree.ElementTree as ET
 
 import aiohttp
 
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    __version__ = _pkg_version("pysaj")
+except (ImportError, PackageNotFoundError):  # pragma: no cover
+    __version__ = "0.0.0"
+
 _LOGGER = logging.getLogger(__name__)
 
 MAPPER_STATES = {
