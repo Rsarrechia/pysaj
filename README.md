@@ -1,57 +1,59 @@
-# pysaj
+# SAJ Solar Inverter — Home Assistant integration
 
-This library was created to communicate with SAJ solar inverters within Home Assistant.
-It is based on the pysma component written by @kellerza
+A Home Assistant custom integration for **SAJ solar inverters**, over either the
+WiFi module (`status.php`) or the ethernet/LAN interface (`real_time_data.xml`).
+It is a maintained fork of the built-in `saj` integration and the
+[`pysaj`](https://github.com/Rsarrechia/pysaj) library, with fixes and extra
+sensors.
 
-## Sensors
+> This branch contains the **Home Assistant integration**. The `pysaj` **library**
+> it depends on lives on the [`master`](https://github.com/Rsarrechia/pysaj/tree/master)
+> branch and is pulled in automatically via the manifest.
 
-`Sensors(wifi=True)` reads the WiFi module's `status/status.php`; `Sensors(wifi=False)`
-reads the ethernet interface's `real_time_data.xml`. A sensor is only reported as
-`enabled` once the inverter has actually returned a value for it, so channels the
-hardware does not have (a third PV string, per-string currents) never show up.
+## What's fixed / added
 
-| Sensor | Unit | Interface |
-| --- | --- | --- |
-| `current_power` | W | both |
-| `today_yield`, `total_yield` | kWh | both |
-| `today_time`, `total_time` | h | both |
-| `total_co2_reduced` | kg | both |
-| `temperature` | °C | both |
-| `state` | | both |
-| `today_max_current` | W | ethernet |
-| `pv1_voltage` … `pv3_voltage` | V | wifi |
-| `pv1_current` … `pv3_current` | A | wifi |
-| `pv1_string1_current` … `pv3_string4_current` | A | wifi |
-| `grid_frequency` | Hz | wifi |
-| `line1_voltage` … `line3_voltage` | V | wifi |
-| `line1_current` … `line3_current` | A | wifi |
-| `bus_voltage` | V | wifi |
+- **No more `total_yield` spike.** Lifetime counters can't go backwards, so a bad
+  reading is no longer booked by Home Assistant as a full counter's worth of
+  production in one hour.
+- **Start-up parsing hardened** — malformed/partial records are discarded instead
+  of misparsed.
+- **Extra sensors** the inverter already reports: PV string voltages/currents,
+  per-phase AC voltage/current, grid frequency, and DC bus voltage. (Currently
+  verified over WiFi; see the library README for the LAN status.)
 
-Field positions, scaling and units for the WiFi channels come from the module's own
-`status.html` (its `cf` array) and `/i18n/en/status.xml` (its `u<N>` entries).
+## Installation
 
-## Validation
+### HACS (recommended)
 
-The WiFi module returns malformed records - truncated bodies, wait markers, zeroed
-registers while it is starting up. Its own web UI throws these away
-(`if(35!=s.length){return;}`); this library does the same, because a partial record
-otherwise yields plausible looking numbers read from the wrong field positions.
+1. HACS → ⋮ → **Custom repositories**.
+2. Add `https://github.com/Rsarrechia/pysaj` with category **Integration**.
+3. Install **SAJ Solar Inverter**, then restart Home Assistant.
 
-A record is only applied when:
+### Manual
 
-* it is a single line whose field count matches a known layout (35, or 23 for older
-  firmware),
-* the daily counters do not exceed their lifetime counters,
-* each reading falls inside that sensor's plausible range.
+Copy `custom_components/saj/` into your Home Assistant `config/custom_components/`
+directory and restart.
 
-`65535` is the module's not-available sentinel and never becomes a reading.
+## Configuration
 
-Readings taken while the inverter's run state is not `Normal` (waking up, waiting,
-error) are not trusted: live values become `None` and the counters keep their last
-known value.
+Settings → **Devices & Services** → **Add Integration** → **SAJ Solar Inverter**.
 
-Lifetime counters (`total_yield`, `total_time`, `total_co2_reduced`) may never
-decrease. Home Assistant reads them as `total_increasing`, so a single low sample is
-taken as a meter reset and the whole counter is then booked as fresh production.
-Implausibly large forward jumps are held until several consecutive readings agree, so
-a corrupt high value cannot become the new baseline either.
+- **Host** — the inverter's IP address or hostname.
+- **Connection type** — `wifi` or `ethernet`.
+- **Username / password** — only for WiFi modules that require a login (optional).
+
+Sensors are created automatically for whatever the inverter reports.
+
+## Note on the `saj` domain
+
+This integration uses the domain `saj`, which is the same as the built-in Home
+Assistant `saj` integration. A custom integration takes precedence over the
+built-in one, so installing this **replaces** the built-in `saj` on your system
+(that is the point — it's the maintained version). Home Assistant will log the
+usual "custom integration which has not been tested" notice; that is expected.
+
+## Credits & license
+
+Based on [fredericvl/pysaj](https://github.com/fredericvl/pysaj) and the original
+Home Assistant `saj` integration, itself derived from work by kellerza.
+Licensed under the MIT License (see `LICENSE`).

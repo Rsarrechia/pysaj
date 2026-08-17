@@ -1,0 +1,22 @@
+{
+  "domain": "saj",
+  "name": "SAJ Solar Inverter",
+  "version": "0.1.1",
+  "codeowners": [
+    "@Rsarrechia",
+    "@fredericvl",
+    "@edurenye"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/Rsarrechia/pysaj",
+  "issue_tracker": "https://github.com/Rsarrechia/pysaj/issues",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "loggers": [
+    "pysaj"
+  ],
+  "quality_scale": "legacy",
+  "requirements": [
+    "pysaj @ git+https://github.com/Rsarrechia/pysaj.git@v0.1.1"
+  ]
+}
