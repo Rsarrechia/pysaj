@@ -9,6 +9,9 @@ All notable changes to this fork are documented here. This project follows
 - Modern packaging: `pyproject.toml` (PEP 621) replaces `setup.py`; test
   dependencies moved to a `test` extra; added a GitHub Actions test workflow.
 - `pysaj.__version__` is now derived from the installed package metadata.
+- Tests no longer depend on `aioresponses` (which does not support current
+  `aiohttp`); the HTTP layer is mocked directly, so the suite runs green
+  against the `aiohttp` Home Assistant ships.
 
 ## [0.1.0]
 

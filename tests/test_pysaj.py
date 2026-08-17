@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from datetime import date, datetime, timedelta, timezone
 import aiohttp
 
+import pysaj
 from pysaj import (
     Sensor,
     Sensors,
@@ -11,7 +12,65 @@ from pysaj import (
     UnauthorizedException,
     UnexpectedResponseException,
 )
-from aioresponses import aioresponses
+
+
+# --- minimal aiohttp mock ---------------------------------------------------
+# aioresponses does not track aiohttp's ClientResponse signature (it breaks on
+# aiohttp >= 3.14, which is what Home Assistant ships), so we mock the small
+# slice of aiohttp that pysaj.read() actually uses. This keeps the suite green
+# against whatever aiohttp is installed. Each route maps a URL to either
+# (body, status) or an Exception instance to raise when the request is made.
+
+
+class _FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    async def text(self, encoding="utf-8"):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeGet:
+    def __init__(self, entry, raise_for_status):
+        self._entry = entry
+        self._raise = raise_for_status
+
+    async def __aenter__(self):
+        entry = self._entry
+        if isinstance(entry, Exception):
+            raise entry
+        body, status = entry
+        if self._raise and status >= 400:
+            raise aiohttp.ClientResponseError(MagicMock(), (), status=status)
+        return _FakeResponse(body)
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def install_fake_http(monkeypatch, routes):
+    """Patch aiohttp.ClientSession so pysaj.read() serves from `routes`."""
+
+    class _FakeSession:
+        def __init__(self, *args, **kwargs):
+            self._raise = kwargs.get("raise_for_status", False)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def get(self, url):
+            return _FakeGet(routes[str(url)], self._raise)
+
+    monkeypatch.setattr(pysaj.aiohttp, "ClientSession", _FakeSession)
 
 
 # A real 35 field record as returned by status.php on a 3 phase inverter with
@@ -153,7 +212,7 @@ class TestSAJ:
         assert saj.url_info == "http://192.168.1.100/info.php"
 
     @pytest.mark.asyncio
-    async def test_read_ethernet_success(self):
+    async def test_read_ethernet_success(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=False)
         sensors = Sensors(wifi=False)
 
@@ -169,50 +228,51 @@ class TestSAJ:
     <state>2</state>
 </root>"""
 
-        with aioresponses() as rs:
-            rs.get(saj.url_info, body=info_xml)
-            rs.get(saj.url, body=data_xml)
+        install_fake_http(monkeypatch, {
+            saj.url_info: (info_xml, 200),
+            saj.url: (data_xml, 200),
+        })
 
-            result = await saj.read(sensors)
+        result = await saj.read(sensors)
 
-            assert result is True
-            assert saj.serialnumber == "123456789"
-            assert sensors["current_power"].value == 1000.0
-            assert sensors["today_yield"].value == 5.0
-            assert sensors["temperature"].value == 25.0
-            assert sensors["state"].value == "Normal"
+        assert result is True
+        assert saj.serialnumber == "123456789"
+        assert sensors["current_power"].value == 1000.0
+        assert sensors["today_yield"].value == 5.0
+        assert sensors["temperature"].value == 25.0
+        assert sensors["state"].value == "Normal"
 
     @pytest.mark.asyncio
-    async def test_read_wifi_success(self):
+    async def test_read_wifi_success(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=True)
         sensors = Sensors(wifi=True)
 
-        info_csv = "SN123456789,x,00,0000,2,7\n"
+        install_fake_http(monkeypatch, {
+            saj.url_info: ("SN123456789,x,00,0000,2,7\n", 200),
+            saj.url: (WIFI_RECORD + "\n", 200),
+        })
 
-        with aioresponses() as rs:
-            rs.get(saj.url_info, body=info_csv)
-            rs.get(saj.url, body=WIFI_RECORD + "\n")
+        result = await saj.read(sensors)
 
-            result = await saj.read(sensors)
-
-            assert result is True
-            assert saj.serialnumber == "SN123456789"
-            assert sensors["total_yield"].value == 17584.33
-            assert sensors["today_yield"].value == 11.65
-            assert sensors["current_power"].value == 185.0
-            assert sensors["temperature"].value == 39.7
-            assert sensors["state"].value == "Normal"
+        assert result is True
+        assert saj.serialnumber == "SN123456789"
+        assert sensors["total_yield"].value == 17584.33
+        assert sensors["today_yield"].value == 11.65
+        assert sensors["current_power"].value == 185.0
+        assert sensors["temperature"].value == 39.7
+        assert sensors["state"].value == "Normal"
 
     @pytest.mark.asyncio
-    async def test_read_wifi_exposes_new_channels(self):
+    async def test_read_wifi_exposes_new_channels(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=True)
         sensors = Sensors(wifi=True)
 
-        with aioresponses() as rs:
-            rs.get(saj.url_info, body="SN1\n")
-            rs.get(saj.url, body=WIFI_RECORD + "\n")
+        install_fake_http(monkeypatch, {
+            saj.url_info: ("SN1\n", 200),
+            saj.url: (WIFI_RECORD + "\n", 200),
+        })
 
-            assert await saj.read(sensors) is True
+        assert await saj.read(sensors) is True
 
         assert sensors["pv1_voltage"].value == 309.9
         assert sensors["pv1_current"].value == 0.39
@@ -223,21 +283,19 @@ class TestSAJ:
         assert sensors["bus_voltage"].value == 620.5
 
     @pytest.mark.asyncio
-    async def test_read_connection_error(self):
+    async def test_read_connection_error(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=False)
         sensors = Sensors()
 
-        with aioresponses() as rs:
-            rs.get(
-                saj.url_info,
-                exception=aiohttp.ClientConnectorError(MagicMock(), OSError()),
-            )
+        install_fake_http(monkeypatch, {
+            saj.url_info: aiohttp.ClientConnectorError(MagicMock(), OSError()),
+        })
 
-            result = await saj.read(sensors)
-            assert result is False
+        result = await saj.read(sensors)
+        assert result is False
 
     @pytest.mark.asyncio
-    async def test_read_unauthorized(self):
+    async def test_read_unauthorized(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=False)
         sensors = Sensors()
 
@@ -246,36 +304,39 @@ class TestSAJ:
     <SN>123</SN>
 </root>"""
 
-        with aioresponses() as rs:
-            rs.get(saj.url_info, body=info_xml)
-            rs.get(saj.url, status=401)
+        install_fake_http(monkeypatch, {
+            saj.url_info: (info_xml, 200),
+            saj.url: ("", 401),
+        })
 
-            with pytest.raises(UnauthorizedException):
-                await saj.read(sensors)
+        with pytest.raises(UnauthorizedException):
+            await saj.read(sensors)
 
     @pytest.mark.asyncio
-    async def test_read_invalid_csv(self):
+    async def test_read_invalid_csv(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=True)
         sensors = Sensors(wifi=True)
 
-        with aioresponses() as rs:
-            rs.get(saj.url_info, body="SN123\n")
-            rs.get(saj.url, body="")
+        install_fake_http(monkeypatch, {
+            saj.url_info: ("SN123\n", 200),
+            saj.url: ("", 200),
+        })
 
-            with pytest.raises(UnexpectedResponseException):
-                await saj.read(sensors)
+        with pytest.raises(UnexpectedResponseException):
+            await saj.read(sensors)
 
     @pytest.mark.asyncio
-    async def test_read_invalid_xml(self):
+    async def test_read_invalid_xml(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=False)
         sensors = Sensors()
 
-        with aioresponses() as rs:
-            rs.get(saj.url_info, body="<invalid>")
-            rs.get(saj.url, body="<also invalid>")
+        install_fake_http(monkeypatch, {
+            saj.url_info: ("<invalid>", 200),
+            saj.url: ("<also invalid>", 200),
+        })
 
-            with pytest.raises(UnexpectedResponseException):
-                await saj.read(sensors)
+        with pytest.raises(UnexpectedResponseException):
+            await saj.read(sensors)
 
 
 class TestRecordGuards:
