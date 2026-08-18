@@ -460,6 +460,27 @@ class TestCumulativeGuards:
         assert saj._read_wifi(spike, sensors) is True
         assert sensors["total_yield"].value == 99999.99
 
+    def test_single_resolution_step_is_never_a_jump(self, caplog):
+        """A 0.1h step in total_time is normal, not an implausible jump."""
+        saj, sensors = self._prime()
+        total_time = sensors["total_time"]
+        assert total_time.value == pytest.approx(12179.4)
+        # The consumer polls every 5s after a successful read, far below the
+        # 5 min that 1.2h/h would need to allow one 0.1h step on its own.
+        total_time.last_update = datetime.now(timezone.utc) - timedelta(seconds=5)
+
+        assert saj._read_wifi(wifi_record({2: 121795}), sensors) is True
+
+        assert total_time.value == pytest.approx(12179.5)
+        assert "Holding back" not in caplog.text
+
+    def test_total_time_still_rejects_a_real_jump(self):
+        saj, sensors = self._prime()
+
+        # +320h of runtime in one poll cycle is not a step, it is a bad read.
+        assert saj._read_wifi(wifi_record({2: 125000}), sensors) is True
+        assert sensors["total_time"].value == pytest.approx(12179.4)
+
     def test_long_gap_allows_a_large_increase(self):
         saj, sensors = self._prime()
         total = sensors["total_yield"]

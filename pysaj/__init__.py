@@ -181,7 +181,13 @@ def _accept_cumulative(sen, new, now):
             (now - sen.last_update).total_seconds() / 3600, MIN_ELAPSED_HOURS
         )
 
-    if new - old <= sen.max_rate * elapsed:
+    # A counter only ever moves in whole steps of its own resolution, so a
+    # single step has to stay plausible however fast we poll. Without this
+    # floor the 0.1h step total_time moves in exceeds its 1.2h/h allowance on
+    # any interval below five minutes, and every normal increment is held back.
+    allowance = max(sen.max_rate * elapsed, _apply_factor(1, sen.factor))
+
+    if round(new - old, sen.precision) <= allowance:
         sen.pending_value = None
         sen.pending_count = 0
         return True
