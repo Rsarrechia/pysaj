@@ -3,6 +3,27 @@
 All notable changes to this fork are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- A cumulative counter's growth allowance is never smaller than one step of its
+  own resolution. `total_time` is `/10` scaled with a 1.2h/h limit, so at any
+  poll interval below five minutes every normal 0.1h increment was held back as
+  an implausible jump and logged as one.
+- Warnings raised per record are throttled: the inverter run state, out of range
+  fields, accepted jumps, malformed records and daily-above-lifetime rejections.
+  Throttle state is keyed per message, so one recurring rejection no longer
+  suppresses a different one or inflates its suppressed count.
+- A sensor whose field is present but whose value is unusable (`grid_frequency`
+  reads 0Hz until the module synchronises) is exposed again, so the consumer
+  still creates its entity when the first read lands in such a window. Channels
+  the inverter reports as not available (`65535`) stay hidden.
+
+### Note
+- Since 0.1.0 the Ethernet/XML path applies each sensor's `factor`, where it
+  previously stored the raw text. Values from `real_time_data.xml` are now
+  scaled the same way as the WiFi ones (e.g. temperature `250` reads as 25.0).
+
 ## [0.1.1] - 2026-08-17
 
 ### Changed
