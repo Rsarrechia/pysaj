@@ -395,6 +395,24 @@ class TestRecordGuards:
         assert sensors["pv3_voltage"].enabled is False
         assert sensors["pv1_string1_current"].enabled is False
 
+    def test_present_but_invalid_field_still_enables_the_sensor(self):
+        """Entities are created from a field's presence, not its plausibility."""
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+
+        # First read of the day, while the module still reports 0Hz: below
+        # grid_frequency's plausible minimum, so there is no value to apply.
+        assert saj._read_wifi(wifi_record({24: 0}), sensors) is True
+
+        assert sensors["grid_frequency"].value is None
+        assert sensors["grid_frequency"].enabled is True
+
+    def test_a_record_of_only_invalid_fields_is_still_discarded(self):
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+
+        assert saj._read_wifi("w", sensors) is False
+
     def test_daily_above_lifetime_is_discarded(self):
         saj, sensors = self._prime()
         before = sensors["today_yield"].value

@@ -38,6 +38,11 @@ URL_PATH_WIFI_INFO = "info.php"
 # reading. Without this a missing channel decodes to e.g. 655.35 kWh.
 NOT_AVAILABLE = 65535
 
+# Staged in place of a field the inverter reports as not available. Distinct
+# from None, which means the field exists but this record's value is unusable:
+# an absent channel must not be given an entity, an unusable one must.
+_ABSENT = object()
+
 # status.php returns exactly one record whose field count identifies the
 # layout. The module's own status.html refuses anything that is not 35 fields
 # ("if(35!=s.length){return;}"); the 23 field layout is the older firmware the
@@ -96,7 +101,7 @@ def _coerce(sen, raw):
 
     if num == NOT_AVAILABLE:
         # Channel the inverter does not have (e.g. a third PV string).
-        return None
+        return _ABSENT
 
     try:
         num = _apply_factor(num, sen.factor)
@@ -131,6 +136,11 @@ def _coerce(sen, raw):
         return None
 
     return num
+
+
+def _is_reading(value):
+    """True if a staged field carries something worth applying."""
+    return value is not None and value is not _ABSENT
 
 
 def _warn_throttled(holder, now, message, *args):
@@ -243,7 +253,7 @@ def _record_is_consistent(holder, staged):
     ):
         day = staged.get(day_name)
         total = staged.get(total_name)
-        if day is None or total is None:
+        if not _is_reading(day) or not _is_reading(total):
             continue
         if day > total + CONSISTENCY_TOLERANCE:
             _warn_throttled(
@@ -648,7 +658,7 @@ class SAJ(object):
         if not _record_is_consistent(self, staged):
             return False
 
-        if not any(value is not None for value in staged.values()):
+        if not any(_is_reading(value) for value in staged.values()):
             # Parsed as XML but contains none of our fields: wrong endpoint.
             raise ET.ParseError("no known sensor fields in response")
 
@@ -688,12 +698,19 @@ class SAJ(object):
             if sen.name not in staged:
                 continue
             value = staged[sen.name]
+            if value is _ABSENT:
+                # A channel this inverter does not have. No entity for it.
+                continue
+
+            # The field exists, so the sensor is worth exposing even if this
+            # particular value is unusable. The consumer builds its entity list
+            # once, from sen.enabled, so a field that happens to be out of
+            # range during the first read would otherwise never get an entity.
+            sen.enabled = True
+
             if value is None:
                 continue
 
-            # The field exists on this inverter, so the sensor is worth
-            # exposing even if this particular record is not trustworthy.
-            sen.enabled = True
             seen += 1
 
             if sen.name != "state" and not running:
