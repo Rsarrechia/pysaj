@@ -32,12 +32,37 @@ show up.
 how you connect. They are currently wired up and verified only for the WiFi interface,
 where field positions, scaling and units come from the module's own `status.html`
 (its `cf` array) and `/i18n/en/status.xml` (its `u<N>` entries). The ethernet/LAN
-interface exposes the same values in `real_time_data.xml`, but under different XML tag
-names that have not been confirmed against a device (for example, PV1 appears to be
-`<pv1-v>` / `<pv1-c>`). Adding LAN support is a matter of filling in each sensor's
-`key` with the correct XML tag — contributions from anyone with a LAN-connected SAJ
-inverter are welcome. Until then these sensors simply stay disabled on the LAN
-interface rather than reporting wrong values.
+interface exposes the same values in `real_time_data.xml`, under different tag names.
+
+Two independently posted `real_time_data.xml` dumps (see [Sources](#sources)) agree on
+these, so they are the tags LAN support should use:
+
+| Sensor | LAN tag |
+| --- | --- |
+| `pv1_voltage` … `pv3_voltage` | `v-pv1`, `v-pv2`, `v-pv3` |
+| `pv1_string1_current` … `pv3_string4_current` | `i-pv11` … `i-pv34` |
+| `bus_voltage` | `v-bus` |
+| `line1_voltage` … `line3_voltage` | `Vac_l1`, `Vac_l2`, `Vac_l3` |
+| `line1_current` … `line3_current` | `Iac_l1`, `Iac_l2`, `Iac_l3` |
+| `grid_frequency` | `Freq1`, and `Freq2` / `Freq3` per further phase |
+
+`pv1_current` … `pv3_current` have no LAN counterpart: the XML reports string currents
+only. The LAN interface also carries per-phase power (`pac1`, `pac2`, `pac3`) that the
+WiFi record does not.
+
+Those tag names come from public dumps rather than from an inverter this library has
+been run against, so they are deliberately not wired up yet - a sensor reading a guessed
+tag that turns out to be wrong would be worse than one that stays disabled. If you have
+a LAN-connected SAJ inverter, `curl http://<inverter>/real_time_data.xml` and open an
+issue with the output; confirming the tags is all that is left to do.
+
+## Sources
+
+The LAN tag names in ¹ above are taken from these publicly posted
+`real_time_data.xml` dumps, which agree with each other:
+
+* <https://forum.domoticz.com/viewtopic.php?t=30154>
+* <https://community.openhab.org/t/read-networkbinding-xml-file-from-saj-suntrino-inverter/105690>
 
 ## Validation
 
