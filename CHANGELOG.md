@@ -3,7 +3,7 @@
 All notable changes to this fork are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.2] - 2026-08-18
 
 ### Fixed
 - A cumulative counter's growth allowance is never smaller than one step of its
@@ -18,6 +18,12 @@ All notable changes to this fork are documented here. This project follows
   reads 0Hz until the module synchronises) is exposed again, so the consumer
   still creates its entity when the first read lands in such a window. Channels
   the inverter reports as not available (`65535`) stay hidden.
+
+### Documentation
+- The LAN XML tag names for the added sensors are corrected: `v-pv1`, `i-pv11`
+  through `i-pv34`, `v-bus`, `Vac_l1`-`Vac_l3`, `Iac_l1`-`Iac_l3` and `Freq1`,
+  from two independently posted `real_time_data.xml` dumps. They are documented
+  but deliberately not wired up until confirmed against a device.
 
 ### Note
 - Since 0.1.0 the Ethernet/XML path applies each sensor's `factor`, where it
