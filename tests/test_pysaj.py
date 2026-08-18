@@ -192,6 +192,20 @@ class TestSensors:
         assert "Duplicate SAJ sensor key" in caplog.text
 
 
+LAN_RECORD = """<?xml version="1.0"?>
+<real_time_data>
+    <state>Normal</state>
+    <p-ac>38</p-ac>
+    <e-today>0.01</e-today>
+    <e-total>2293.08</e-total>
+    <t-today>1.2</t-today>
+    <t-total>6559.9</t-total>
+    <CO2>2286.9</CO2>
+    <temp>7.0</temp>
+    <maxPower>43</maxPower>
+</real_time_data>"""
+
+
 class TestSAJ:
     def test_init_ethernet(self):
         saj = SAJ("192.168.1.100", wifi=False)
@@ -314,6 +328,52 @@ class TestSAJ:
             await saj.read(sensors)
 
     @pytest.mark.asyncio
+    async def test_missing_info_page_does_not_stop_the_read(self, monkeypatch):
+        """Newer firmware dropped equipment_data.xml; it only holds the serial."""
+        saj = SAJ("192.168.1.100", wifi=False)
+        sensors = Sensors(wifi=False)
+
+        install_fake_http(monkeypatch, {
+            saj.url_info: ("", 404),
+            saj.url: (LAN_RECORD, 200),
+        })
+
+        assert await saj.read(sensors) is True
+        assert saj.serialnumber == pysaj.UNKNOWN_SERIAL
+        assert sensors["current_power"].value == 38.0
+
+    @pytest.mark.asyncio
+    async def test_info_page_is_read_once(self, monkeypatch):
+        saj = SAJ("192.168.1.100", wifi=False)
+        sensors = Sensors(wifi=False)
+
+        info_xml = '<?xml version="1.0"?><root><SN>123456789</SN></root>'
+        routes = {saj.url_info: (info_xml, 200), saj.url: (LAN_RECORD, 200)}
+        install_fake_http(monkeypatch, routes)
+
+        assert await saj.read(sensors) is True
+        assert saj.serialnumber == "123456789"
+
+        # Once the serial is known the page is never requested again, so the
+        # route can go away entirely.
+        del routes[saj.url_info]
+        assert await saj.read(sensors) is True
+        assert saj.serialnumber == "123456789"
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_info_page_still_raises(self, monkeypatch):
+        saj = SAJ("192.168.1.100", wifi=True, username="u", password="bad")
+        sensors = Sensors(wifi=True)
+
+        install_fake_http(monkeypatch, {
+            saj.url_info: ("", 401),
+            saj.url: (WIFI_RECORD, 200),
+        })
+
+        with pytest.raises(UnauthorizedException):
+            await saj.read(sensors)
+
+    @pytest.mark.asyncio
     async def test_read_invalid_csv(self, monkeypatch):
         saj = SAJ("192.168.1.100", wifi=True)
         sensors = Sensors(wifi=True)
@@ -338,20 +398,6 @@ class TestSAJ:
 
         with pytest.raises(UnexpectedResponseException):
             await saj.read(sensors)
-
-
-LAN_RECORD = """<?xml version="1.0"?>
-<real_time_data>
-    <state>Normal</state>
-    <p-ac>38</p-ac>
-    <e-today>0.01</e-today>
-    <e-total>2293.08</e-total>
-    <t-today>1.2</t-today>
-    <t-total>6559.9</t-total>
-    <CO2>2286.9</CO2>
-    <temp>7.0</temp>
-    <maxPower>43</maxPower>
-</real_time_data>"""
 
 
 class TestEthernetWireFormat:

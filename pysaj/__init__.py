@@ -35,6 +35,9 @@ NOT_RUNNING_STATES = frozenset(
     state for state in MAPPER_STATES.values() if state != STATE_NORMAL
 )
 
+# Until the device info page has been read, if it can be read at all.
+UNKNOWN_SERIAL = "XXXXXXXXXXXXXXXXX"
+
 URL_PATH_ETHERNET = "real_time_data.xml"
 URL_PATH_ETHERNET_INFO = "equipment_data.xml"
 URL_PATH_WIFI = "status/status.php"
@@ -520,7 +523,7 @@ class SAJ(object):
         self.wifi = wifi
         self.username = username
         self.password = password
-        self.serialnumber = "XXXXXXXXXXXXXXXXX"
+        self.serialnumber = UNKNOWN_SERIAL
         # Throttle state for warnings about the record as a whole, keyed on the
         # message the same way the per-sensor ones are.
         self.warn_history = {}
@@ -545,11 +548,9 @@ class SAJ(object):
             async with aiohttp.ClientSession(
                 timeout=timeout, raise_for_status=True
             ) as session:
-                current_url = self.url_info
-                async with session.get(current_url) as response:
-                    data = await response.text(encoding="latin1")
-                    _LOGGER.debug("Info data received: %s", data)
-                    self._read_info(data)
+                if self.serialnumber == UNKNOWN_SERIAL:
+                    current_url = self.url_info
+                    await self._read_info_page(session)
 
                 current_url = self.url
                 async with session.get(current_url) as response:
@@ -591,6 +592,38 @@ class SAJ(object):
                 str.format(
                     "No valid XML received from {0} at {1}", self.host, current_url
                 )
+            )
+
+    async def _read_info_page(self, session):
+        """Read the device info page for the serial number, if it still exists.
+
+        Newer firmware has dropped this page - SAJ pushed an update that removed
+        it - and it carries nothing but the serial number, so failing to read it
+        must not stop the inverter being read. A 401 still propagates, because
+        that means the credentials are wrong rather than the page being gone.
+        """
+        try:
+            async with session.get(self.url_info) as response:
+                data = await response.text(encoding="latin1")
+                _LOGGER.debug("Info data received: %s", data)
+                self._read_info(data)
+        except aiohttp.client_exceptions.ClientResponseError as err:
+            if err.status == 401:
+                raise
+            _warn_throttled(
+                self,
+                datetime.now(timezone.utc),
+                "Could not read %s (%s). Continuing without the serial number%s",
+                self.url_info,
+                err.status,
+            )
+        except (ET.ParseError, csv.Error) as err:
+            _warn_throttled(
+                self,
+                datetime.now(timezone.utc),
+                "Could not parse %s (%s). Continuing without the serial number%s",
+                self.url_info,
+                err,
             )
 
     def _read_info(self, data):
