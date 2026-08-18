@@ -224,9 +224,9 @@ class TestSAJ:
         data_xml = """<?xml version="1.0"?>
 <root>
     <p-ac>1000</p-ac>
-    <e-today>500</e-today>
-    <temp>250</temp>
-    <state>2</state>
+    <e-today>5.0</e-today>
+    <temp>25.0</temp>
+    <state>Normal</state>
 </root>"""
 
         install_fake_http(monkeypatch, {
@@ -338,6 +338,76 @@ class TestSAJ:
 
         with pytest.raises(UnexpectedResponseException):
             await saj.read(sensors)
+
+
+LAN_RECORD = """<?xml version="1.0"?>
+<real_time_data>
+    <state>Normal</state>
+    <p-ac>38</p-ac>
+    <e-today>0.01</e-today>
+    <e-total>2293.08</e-total>
+    <t-today>1.2</t-today>
+    <t-total>6559.9</t-total>
+    <CO2>2286.9</CO2>
+    <temp>7.0</temp>
+    <maxPower>43</maxPower>
+</real_time_data>"""
+
+
+class TestEthernetWireFormat:
+    """The XML is already in real units and spells the state out in words.
+
+    Values here are quoted from a real_time_data.xml posted publicly; 0.1.0
+    through 0.1.2 applied the CSV scaling factors to them and mapped the state
+    through MAPPER_STATES, which blanked every LAN reading on every poll.
+    """
+
+    def _read(self, body=LAN_RECORD):
+        saj = SAJ("192.168.1.100", wifi=False)
+        sensors = Sensors(wifi=False)
+        assert saj._read_ethernet(body, sensors) is True
+        return saj, sensors
+
+    def test_values_are_not_scaled_again(self):
+        _, sensors = self._read()
+
+        assert sensors["temperature"].value == 7.0
+        assert sensors["current_power"].value == 38.0
+        assert sensors["today_yield"].value == 0.01
+        assert sensors["total_yield"].value == 2293.08
+        assert sensors["today_time"].value == 1.2
+        assert sensors["total_time"].value == 6559.9
+
+    def test_worded_state_is_understood(self):
+        _, sensors = self._read()
+
+        assert sensors["state"].value == "Normal"
+        # The run-state gate must not fire, so live readings survive.
+        assert sensors["current_power"].value == 38.0
+
+    def test_worded_non_normal_state_still_gates(self):
+        _, sensors = self._read(LAN_RECORD.replace("<state>Normal</state>",
+                                                   "<state>Waiting</state>"))
+
+        assert sensors["state"].value == "Waiting"
+        assert sensors["current_power"].value is None
+
+    def test_unknown_state_code_is_treated_as_running(self):
+        """An unrecognised state must not blank every sensor."""
+        _, sensors = self._read(LAN_RECORD.replace("<state>Normal</state>",
+                                                   "<state>9</state>"))
+
+        assert sensors["state"].value == "Unknown(9)"
+        assert sensors["current_power"].value == 38.0
+
+    def test_dash_marks_a_channel_the_inverter_lacks(self):
+        _, sensors = self._read(LAN_RECORD.replace("<maxPower>43</maxPower>",
+                                                   "<maxPower>-</maxPower>"))
+
+        assert sensors["today_max_current"].value is None
+        assert sensors["today_max_current"].enabled is False
+        # The rest of the record is unaffected.
+        assert sensors["current_power"].value == 38.0
 
 
 class TestRecordGuards:

@@ -28,6 +28,13 @@ MAPPER_STATES = {
 
 STATE_NORMAL = "Normal"
 
+# Only these gate the readings. Anything else - including a state code this
+# library has never seen - is treated as running, so an unrecognised value
+# cannot silently blank every sensor.
+NOT_RUNNING_STATES = frozenset(
+    state for state in MAPPER_STATES.values() if state != STATE_NORMAL
+)
+
 URL_PATH_ETHERNET = "real_time_data.xml"
 URL_PATH_ETHERNET_INFO = "equipment_data.xml"
 URL_PATH_WIFI = "status/status.php"
@@ -37,6 +44,12 @@ URL_PATH_WIFI_INFO = "info.php"
 # for every field, so it is the module's not-available sentinel rather than a
 # reading. Without this a missing channel decodes to e.g. 655.35 kWh.
 NOT_AVAILABLE = 65535
+
+# The LAN interface writes its values out already scaled and human readable
+# (<temp>7.0</temp>, <e-total>2293.08</e-total>, <state>Normal</state>) and marks
+# a channel the inverter does not have with a literal "-". The WiFi module sends
+# raw integers that need the sensor's factor, and 65535 for a missing channel.
+NOT_AVAILABLE_TEXT = "-"
 
 # Staged in place of a field the inverter reports as not available. Distinct
 # from None, which means the field exists but this record's value is unusable:
@@ -87,11 +100,15 @@ def _apply_factor(num, factor):
     raise ValueError(f"Unsupported sensor factor {factor!r}")
 
 
-def _coerce(sen, raw):
+def _coerce(sen, raw, wifi):
     """Turn one raw field into a validated reading, or None if unusable."""
     text = raw.strip()
     if not text:
         return None
+
+    if text == NOT_AVAILABLE_TEXT:
+        # LAN: a channel this inverter does not have.
+        return _ABSENT
 
     try:
         num = float(text)
@@ -99,15 +116,18 @@ def _coerce(sen, raw):
         _LOGGER.debug("Sensor %s: discarding non-numeric value %r", sen.name, text)
         return None
 
-    if num == NOT_AVAILABLE:
-        # Channel the inverter does not have (e.g. a third PV string).
-        return _ABSENT
+    if wifi:
+        if num == NOT_AVAILABLE:
+            # Channel the inverter does not have (e.g. a third PV string).
+            return _ABSENT
 
-    try:
-        num = _apply_factor(num, sen.factor)
-    except ValueError:
-        _LOGGER.error("Sensor %s has an invalid factor %r", sen.name, sen.factor)
-        return None
+        # Only the CSV record needs scaling; the XML is already in real units,
+        # and dividing it again is how 0.1.0 broke every LAN reading.
+        try:
+            num = _apply_factor(num, sen.factor)
+        except ValueError:
+            _LOGGER.error("Sensor %s has an invalid factor %r", sen.name, sen.factor)
+            return None
 
     # A field that is out of range usually stays out of range on every poll -
     # the WiFi module reports 0Hz until the grid synchronises, for the whole
@@ -637,7 +657,7 @@ class SAJ(object):
             index = getattr(sen, index_attr)
             if index < 0 or index >= len(values):
                 continue
-            staged[sen.name] = self._stage(sen, values[index])
+            staged[sen.name] = self._stage(sen, values[index], wifi=True)
 
         if not _record_is_consistent(self, staged):
             return False
@@ -653,7 +673,7 @@ class SAJ(object):
             find = xml.find(sen.key)
             if find is None or find.text is None:
                 continue
-            staged[sen.name] = self._stage(sen, find.text)
+            staged[sen.name] = self._stage(sen, find.text, wifi=False)
 
         if not _record_is_consistent(self, staged):
             return False
@@ -665,14 +685,20 @@ class SAJ(object):
         return self._commit(sensors, staged)
 
     @staticmethod
-    def _stage(sen, raw):
+    def _stage(sen, raw, wifi):
         """Validate one raw field without applying it yet."""
         if sen.name == "state":
             text = raw.strip()
             if not text:
                 return None
-            return MAPPER_STATES.get(text, f"Unknown({text})")
-        return _coerce(sen, raw)
+            if text in MAPPER_STATES:
+                return MAPPER_STATES[text]
+            if text.lstrip("-").isdigit():
+                # A numeric run state this library does not know about.
+                return f"Unknown({text})"
+            # The LAN interface spells the state out: <state>Normal</state>.
+            return text
+        return _coerce(sen, raw, wifi)
 
     def _commit(self, sensors, staged):
         """Apply a validated record to the sensors."""
@@ -680,7 +706,7 @@ class SAJ(object):
         today = date.today()
 
         state = staged.get("state")
-        running = state is None or state == STATE_NORMAL
+        running = state is None or state not in NOT_RUNNING_STATES
         if not running:
             # Sunrise and sunset both spend a while here, and read() still
             # succeeds, so the consumer keeps polling at its shortest interval.
