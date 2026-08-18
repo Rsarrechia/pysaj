@@ -5,6 +5,7 @@ import aiohttp
 
 import pysaj
 from pysaj import (
+    WARN_INTERVAL_SECONDS,
     Sensor,
     Sensors,
     SAJ,
@@ -489,6 +490,76 @@ class TestCumulativeGuards:
 
         assert saj._read_wifi(wifi_record({1: 1763433}), sensors) is True
         assert sensors["total_yield"].value == 17634.33
+
+
+class TestWarningThrottle:
+    """A condition that repeats on every poll must not flood the log.
+
+    The consumer polls every 5s after a successful read, so an unthrottled
+    warning about a sunrise or a stuck field means hundreds of lines an hour.
+    """
+
+    def _prime(self):
+        saj = SAJ("192.168.1.100", wifi=True)
+        sensors = Sensors(wifi=True)
+        assert saj._read_wifi(WIFI_RECORD, sensors) is True
+        return saj, sensors
+
+    def test_repeated_state_warning_is_throttled(self, caplog):
+        saj, sensors = self._prime()
+        waking = wifi_record({34: 1})
+
+        for _ in range(10):
+            assert saj._read_wifi(waking, sensors) is True
+
+        assert caplog.text.count("Inverter state is") == 1
+
+    def test_repeated_out_of_range_warning_is_throttled(self, caplog):
+        saj, sensors = self._prime()
+        # The module reports 0Hz until the grid synchronises, for the whole
+        # dawn window, and 0 is below grid_frequency's plausible minimum.
+        for _ in range(10):
+            assert saj._read_wifi(wifi_record({24: 0}), sensors) is True
+
+        assert caplog.text.count("Discarding grid_frequency reading") == 1
+
+    def test_repeated_malformed_record_warning_is_throttled(self, caplog):
+        saj, _ = self._prime()
+
+        for _ in range(10):
+            assert saj._read_wifi("w", Sensors(wifi=True)) is False
+
+        assert caplog.text.count("Discarding status record with") == 1
+
+    def test_distinct_conditions_do_not_mask_each_other(self, caplog):
+        """Throttling is per message, so one rejection cannot hide another."""
+        saj, sensors = self._prime()
+
+        assert saj._read_wifi(wifi_record({1: 1756793}), sensors) is True
+        assert "going backwards" in caplog.text
+
+        # Well inside the throttle interval, but a different condition, so it
+        # still has to be reported.
+        assert saj._read_wifi(wifi_record({1: 9999999}), sensors) is True
+        assert "Holding back" in caplog.text
+
+    def test_suppressed_count_is_reported_per_message(self, caplog):
+        saj, sensors = self._prime()
+        backwards = wifi_record({1: 1756793})
+
+        for _ in range(4):
+            assert saj._read_wifi(backwards, sensors) is True
+        # Pretend the throttle interval has passed for this one message.
+        total = sensors["total_yield"]
+        message, (_, suppressed) = next(iter(total.warn_history.items()))
+        assert suppressed == 3
+        total.warn_history[message] = (
+            datetime.now(timezone.utc) - timedelta(seconds=WARN_INTERVAL_SECONDS + 1),
+            suppressed,
+        )
+
+        assert saj._read_wifi(backwards, sensors) is True
+        assert "3 identical since the last message" in caplog.text
 
 
 class TestRunStateGate:

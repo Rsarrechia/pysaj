@@ -104,9 +104,14 @@ def _coerce(sen, raw):
         _LOGGER.error("Sensor %s has an invalid factor %r", sen.name, sen.factor)
         return None
 
+    # A field that is out of range usually stays out of range on every poll -
+    # the WiFi module reports 0Hz until the grid synchronises, for the whole
+    # dawn window - so these are throttled like the counter rejections.
     if sen.min_value is not None and num < sen.min_value:
-        _LOGGER.warning(
-            "Discarding %s reading %s%s: below the plausible minimum of %s",
+        _warn_throttled(
+            sen,
+            datetime.now(timezone.utc),
+            "Discarding %s reading %s%s: below the plausible minimum of %s%s",
             sen.name,
             num,
             sen.unit,
@@ -114,8 +119,10 @@ def _coerce(sen, raw):
         )
         return None
     if sen.max_value is not None and num > sen.max_value:
-        _LOGGER.warning(
-            "Discarding %s reading %s%s: above the plausible maximum of %s",
+        _warn_throttled(
+            sen,
+            datetime.now(timezone.utc),
+            "Discarding %s reading %s%s: above the plausible maximum of %s%s",
             sen.name,
             num,
             sen.unit,
@@ -126,24 +133,23 @@ def _coerce(sen, raw):
     return num
 
 
-def _warn_throttled(sen, now, message, *args):
-    """Warn about a repeating rejection without flooding the log.
+def _warn_throttled(holder, now, message, *args):
+    """Warn about a repeating condition without flooding the log.
 
-    The trailing "%s" in `message` receives a note about how many identical
-    rejections were suppressed since the previous warning.
+    `holder` is any object with a `warn_history` dict - a sensor for a
+    per-sensor condition, the SAJ instance for one about the record as a whole.
+    Throttling is keyed on the message, so one recurring condition cannot mask
+    a different one, and the trailing "%s" in `message` receives a note about
+    how many identical messages were suppressed since the previous one.
     """
-    last = sen.last_warning
+    last, suppressed = holder.warn_history.get(message, (None, 0))
     if last is not None and (now - last).total_seconds() < WARN_INTERVAL_SECONDS:
-        sen.suppressed_warnings += 1
+        holder.warn_history[message] = (last, suppressed + 1)
         return
 
-    if sen.suppressed_warnings:
-        note = f" ({sen.suppressed_warnings} identical since the last message)"
-    else:
-        note = ""
+    note = f" ({suppressed} identical since the last message)" if suppressed else ""
     _LOGGER.warning(message, *args, note)
-    sen.last_warning = now
-    sen.suppressed_warnings = 0
+    holder.warn_history[message] = (now, 0)
 
 
 def _accept_cumulative(sen, new, now):
@@ -214,8 +220,10 @@ def _accept_cumulative(sen, new, now):
         )
         return False
 
-    _LOGGER.warning(
-        "Accepting jump for %s (%s -> %s%s) after %s consistent readings",
+    _warn_throttled(
+        sen,
+        now,
+        "Accepting jump for %s (%s -> %s%s) after %s consistent readings%s",
         sen.name,
         old,
         new,
@@ -227,7 +235,7 @@ def _accept_cumulative(sen, new, now):
     return True
 
 
-def _record_is_consistent(staged):
+def _record_is_consistent(holder, staged):
     """Reject a record whose daily counters exceed their lifetime counters."""
     for day_name, total_name in (
         ("today_yield", "total_yield"),
@@ -238,8 +246,10 @@ def _record_is_consistent(staged):
         if day is None or total is None:
             continue
         if day > total + CONSISTENCY_TOLERANCE:
-            _LOGGER.warning(
-                "Discarding record: %s (%s) exceeds %s (%s)",
+            _warn_throttled(
+                holder,
+                datetime.now(timezone.utc),
+                "Discarding record: %s (%s) exceeds %s (%s)%s",
                 day_name,
                 day,
                 total_name,
@@ -288,8 +298,7 @@ class Sensor(object):
         self.last_update = None
         self.pending_value = None
         self.pending_count = 0
-        self.last_warning = None
-        self.suppressed_warnings = 0
+        self.warn_history = {}
 
         # Decimals implied by the factor, for display purposes.
         self.precision = 0
@@ -482,6 +491,9 @@ class SAJ(object):
         self.username = username
         self.password = password
         self.serialnumber = "XXXXXXXXXXXXXXXXX"
+        # Throttle state for warnings about the record as a whole, keyed on the
+        # message the same way the per-sensor ones are.
+        self.warn_history = {}
 
         self.url = "http://{0}/".format(self.host)
         if self.wifi:
@@ -577,16 +589,23 @@ class SAJ(object):
         if not rows:
             raise csv.Error("empty response")
 
+        now = datetime.now(timezone.utc)
+
         if len(rows) > 1:
-            _LOGGER.warning(
-                "Discarding status record: expected a single line, got %s", len(rows)
+            _warn_throttled(
+                self,
+                now,
+                "Discarding status record: expected a single line, got %s%s",
+                len(rows),
             )
             return None
 
         values = [field.strip() for field in rows[0]]
         if len(values) not in WIFI_LAYOUTS:
-            _LOGGER.warning(
-                "Discarding status record with %s fields, expected one of %s: %r",
+            _warn_throttled(
+                self,
+                now,
+                "Discarding status record with %s fields, expected one of %s: %r%s",
                 len(values),
                 sorted(WIFI_LAYOUTS),
                 data,
@@ -610,7 +629,7 @@ class SAJ(object):
                 continue
             staged[sen.name] = self._stage(sen, values[index])
 
-        if not _record_is_consistent(staged):
+        if not _record_is_consistent(self, staged):
             return False
 
         return self._commit(sensors, staged)
@@ -626,7 +645,7 @@ class SAJ(object):
                 continue
             staged[sen.name] = self._stage(sen, find.text)
 
-        if not _record_is_consistent(staged):
+        if not _record_is_consistent(self, staged):
             return False
 
         if not any(value is not None for value in staged.values()):
@@ -645,8 +664,7 @@ class SAJ(object):
             return MAPPER_STATES.get(text, f"Unknown({text})")
         return _coerce(sen, raw)
 
-    @staticmethod
-    def _commit(sensors, staged):
+    def _commit(self, sensors, staged):
         """Apply a validated record to the sensors."""
         now = datetime.now(timezone.utc)
         today = date.today()
@@ -654,9 +672,13 @@ class SAJ(object):
         state = staged.get("state")
         running = state is None or state == STATE_NORMAL
         if not running:
-            _LOGGER.warning(
+            # Sunrise and sunset both spend a while here, and read() still
+            # succeeds, so the consumer keeps polling at its shortest interval.
+            _warn_throttled(
+                self,
+                now,
                 "Inverter state is %s, not %s. Live readings are cleared and "
-                "counters keep their last known value until it runs again",
+                "counters keep their last known value until it runs again%s",
                 state,
                 STATE_NORMAL,
             )
@@ -692,7 +714,9 @@ class SAJ(object):
             sen.last_update = now
 
         if not seen:
-            _LOGGER.warning("Discarding record: no usable sensor values")
+            _warn_throttled(
+                self, now, "Discarding record: no usable sensor values%s"
+            )
             return False
 
         return True
